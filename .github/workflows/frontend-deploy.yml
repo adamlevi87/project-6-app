@@ -120,7 +120,7 @@ jobs:
           git clone https://x-access-token:${GH_TOKEN}@github.com/${GITOPS_REPO}.git gitops-repo
           cd gitops-repo
           
-          CURRENT_DIGEST=$(grep 'digest:' environments/${ENVIRONMENT}/manifests/frontend/infra-values.yaml | sed 's/.*digest: "\(.*\)"/\1/')
+          CURRENT_DIGEST=$(grep 'digest:' environments/${ENVIRONMENT}/manifests/frontend/digest-values.yaml | sed 's/.*digest: "\(.*\)"/\1/')
           
           if [ "$CURRENT_DIGEST" == "$NEW_DIGEST" ]; then
             echo "changed=false" >> $GITHUB_OUTPUT
@@ -145,8 +145,8 @@ jobs:
           BRANCH_NAME="frontend-update-$(date +%Y%m%d-%H%M%S)"
           git checkout -b "$BRANCH_NAME"
           
-          sed -i "s|digest: \"sha256:.*\"|digest: \"${NEW_DIGEST}\"|g" environments/${ENVIRONMENT}/manifests/frontend/infra-values.yaml
-          git add environments/${ENVIRONMENT}/manifests/frontend/infra-values.yaml
+          sed -i "s|digest: \"sha256:.*\"|digest: \"${NEW_DIGEST}\"|g" environments/${ENVIRONMENT}/manifests/frontend/digest-values.yaml
+          git add environments/${ENVIRONMENT}/manifests/frontend/digest-values.yaml
           git commit -m "Update frontend digest for ${ENVIRONMENT}: ${NEW_DIGEST}"
           git push origin "$BRANCH_NAME"
           
