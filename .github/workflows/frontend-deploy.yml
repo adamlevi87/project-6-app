@@ -1,0 +1,158 @@
+name: Frontend - Build and Deploy to ECR
+on:
+  workflow_dispatch:
+    inputs:
+      env:
+        description: "Environment to manage"
+        required: true
+        default: dev
+        type: choice
+        options:
+          - dev
+          - staging
+          - prod
+      action:
+        description: "Action to perform"
+        required: true
+        default: build-and-push
+        type: choice
+        options:
+          - build-and-push
+          - update-digest-only
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: app/frontend
+    permissions:
+      contents: read
+      id-token: write  # Required for OIDC
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Set environment variables
+        run: |
+          case "${{ github.event.inputs.env }}" in
+            dev)
+              echo "AWS_REGION=${{ vars.AWS_REGION_TF_DEV }}" >> $GITHUB_ENV
+              echo "AWS_ROLE_TO_ASSUME=${{ secrets.AWS_ROLE_TO_ASSUME_TF_DEV }}" >> $GITHUB_ENV
+              echo "ECR_REPOSITORY_FRONTEND=${{ secrets.ECR_REPOSITORY_FRONTEND_TF_DEV }}" >> $GITHUB_ENV
+              echo "GH_TOKEN=${{ secrets.TOKEN_GITHUB_TF_DEV }}" >> $GITHUB_ENV
+              echo "GITOPS_REPO=${{ vars.GITOPS_REPO_TF_DEV }}" >> $GITHUB_ENV
+              ;;
+            staging)
+              echo "AWS_REGION=${{ vars.AWS_REGION_TF_STAGING }}" >> $GITHUB_ENV
+              echo "AWS_ROLE_TO_ASSUME=${{ secrets.AWS_ROLE_TO_ASSUME_TF_STAGING }}" >> $GITHUB_ENV
+              echo "ECR_REPOSITORY_FRONTEND=${{ secrets.ECR_REPOSITORY_FRONTEND_TF_STAGING }}" >> $GITHUB_ENV
+              echo "GH_TOKEN=${{ secrets.TOKEN_GITHUB_TF_STAGING }}" >> $GITHUB_ENV
+              echo "GITOPS_REPO=${{ vars.GITOPS_REPO_TF_STAGING }}" >> $GITHUB_ENV
+              ;;
+            prod)
+              echo "AWS_REGION=${{ vars.AWS_REGION_TF_PROD }}" >> $GITHUB_ENV
+              echo "AWS_ROLE_TO_ASSUME=${{ secrets.AWS_ROLE_TO_ASSUME_TF_PROD }}" >> $GITHUB_ENV
+              echo "ECR_REPOSITORY_FRONTEND=${{ secrets.ECR_REPOSITORY_FRONTEND_TF_PROD }}" >> $GITHUB_ENV
+              echo "GH_TOKEN=${{ secrets.TOKEN_GITHUB_TF_PROD }}" >> $GITHUB_ENV
+              echo "GITOPS_REPO=${{ vars.GITOPS_REPO_TF_PROD }}" >> $GITHUB_ENV
+              ;;
+          esac
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.AWS_ROLE_TO_ASSUME }}
+          aws-region: ${{ env.AWS_REGION }}
+      
+      - name: Log in to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+      
+      - name: Extract short SHA
+        if: ${{ github.event.inputs.action == 'build-and-push' }}
+        id: vars
+        run: echo "sha_short=$(echo $GITHUB_SHA | cut -c1-7)" >> $GITHUB_OUTPUT
+      
+      - name: Set image tagging variables
+        if: ${{ github.event.inputs.action == 'build-and-push' }}
+        run: |
+          IMAGE_BASE="${{ env.ECR_REPOSITORY_FRONTEND }}"
+          TAG="${{ github.run_id }}-${{ steps.vars.outputs.sha_short }}"
+          IMAGE_URI="${IMAGE_BASE}:${TAG}"
+          echo "IMAGE_BASE=$IMAGE_BASE" >> $GITHUB_ENV
+          echo "TAG=$TAG" >> $GITHUB_ENV
+          echo "IMAGE_URI=$IMAGE_URI" >> $GITHUB_ENV
+      
+      - name: Build and push Docker image
+        if: ${{ github.event.inputs.action == 'build-and-push' }}
+        run: |
+          docker build --no-cache -t "$IMAGE_URI" .
+          docker push "$IMAGE_URI"
+      
+      - name: Capture image digest
+        id: digest
+        run: |
+          if [ "${{ github.event.inputs.action }}" == "build-and-push" ]; then
+            DIGEST=$(docker inspect --format='{{index .RepoDigests 0}}' "$IMAGE_URI")
+            DIGEST_ONLY=$(echo "$DIGEST" | cut -d@ -f2)
+          else
+            # Get latest image from ECR
+            LATEST_IMAGE=$(aws ecr describe-images --repository-name $(basename ${{ env.ECR_REPOSITORY_FRONTEND }}) --region ${{ env.AWS_REGION }} --query 'sort_by(imageDetails,&imagePushedAt)[-1].imageDigest' --output text)
+            DIGEST_ONLY="$LATEST_IMAGE"
+          fi
+          echo "digest=$DIGEST" >> $GITHUB_OUTPUT
+          echo "digest_only=$DIGEST_ONLY" >> $GITHUB_OUTPUT
+      
+      - name: Check if digest changed
+        id: check-changes
+        env:
+          GH_TOKEN: "${{ env.GH_TOKEN }}"
+          GITOPS_REPO: ${{ env.GITOPS_REPO }}
+          ENVIRONMENT: ${{ github.event.inputs.env }}
+          NEW_DIGEST: ${{ steps.digest.outputs.digest_only }}
+        run: |
+          rm -rf gitops-repo
+          git clone https://x-access-token:${GH_TOKEN}@github.com/${GITOPS_REPO}.git gitops-repo
+          cd gitops-repo
+          
+          CURRENT_DIGEST=$(grep 'digest:' environments/${ENVIRONMENT}/manifests/frontend/infra-values.yaml | sed 's/.*digest: "\(.*\)"/\1/')
+          
+          if [ "$CURRENT_DIGEST" == "$NEW_DIGEST" ]; then
+            echo "changed=false" >> $GITHUB_OUTPUT
+            echo "No digest change detected. Current: $CURRENT_DIGEST"
+          else
+            echo "changed=true" >> $GITHUB_OUTPUT
+            echo "Digest changed. Current: $CURRENT_DIGEST -> New: $NEW_DIGEST"
+          fi
+
+      - name: Update GitOps repository
+        if: ${{ steps.check-changes.outputs.changed == 'true' }}
+        env:
+          GH_TOKEN: "${{ env.GH_TOKEN }}"
+          GITOPS_REPO: ${{ env.GITOPS_REPO }}
+          ENVIRONMENT: ${{ github.event.inputs.env }}
+          NEW_DIGEST: ${{ steps.digest.outputs.digest_only }}
+        run: |
+          cd gitops-repo
+          git config user.name "GitHub Actions"
+          git config user.email "actions@github.com"
+          
+          BRANCH_NAME="frontend-update-$(date +%Y%m%d-%H%M%S)"
+          git checkout -b "$BRANCH_NAME"
+          
+          sed -i "s|digest: \"sha256:.*\"|digest: \"${NEW_DIGEST}\"|g" environments/${ENVIRONMENT}/manifests/frontend/infra-values.yaml
+          git add environments/${ENVIRONMENT}/manifests/frontend/infra-values.yaml
+          git commit -m "Update frontend digest for ${ENVIRONMENT}: ${NEW_DIGEST}"
+          git push origin "$BRANCH_NAME"
+          
+          # Create PR
+          curl -X POST \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${GITOPS_REPO}/pulls" \
+            -d "{\"title\":\"Frontend: Update ${ENVIRONMENT} digest\",\"head\":\"${BRANCH_NAME}\",\"base\":\"main\"}"
+      
+      - name: Output summary
+        run: |
+          echo "Frontend image built and pushed:"
+          echo "- Image: ${{ steps.digest.outputs.digest }}"
