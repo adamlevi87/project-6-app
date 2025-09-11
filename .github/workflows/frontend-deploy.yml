@@ -1,3 +1,5 @@
+# .github/workflows/frontend-deploy.yml (OPTIMIZED VERSION)
+
 name: Frontend - Build and Deploy to ECR
 on:
   workflow_dispatch:
@@ -19,6 +21,7 @@ on:
         options:
           - build-and-push
           - update-digest-only
+          - force-rebuild
       auto_merge:
         description: "Auto-merge the GitOps PR"
         required: false
@@ -37,6 +40,8 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 2  # Need previous commit for change detection
       
       - name: Set environment variables
         run: |
@@ -64,52 +69,98 @@ jobs:
               ;;
           esac
 
+      - name: Check for app code changes
+        id: check-app-changes
+        run: |
+          if [ "${{ github.event.inputs.action }}" == "force-rebuild" ]; then
+            echo "app_changed=true" >> $GITHUB_OUTPUT
+            echo "🔨 Force rebuild requested"
+          elif [ "${{ github.event.inputs.action }}" == "update-digest-only" ]; then
+            echo "app_changed=false" >> $GITHUB_OUTPUT
+            echo "📦 Update digest only - skipping build"
+          else
+            # Check if app code actually changed
+            if git diff --quiet HEAD~1 HEAD -- app/ helm/ Dockerfile* || [ "${{ github.event_name }}" == "repository_dispatch" ]; then
+              if [ "${{ github.event_name }}" == "repository_dispatch" ]; then
+                echo "app_changed=true" >> $GITHUB_OUTPUT
+                echo "🚀 Infrastructure ready - building initial image"
+              else
+                echo "app_changed=false" >> $GITHUB_OUTPUT
+                echo "ℹ️ No app code changes detected"
+              fi
+            else
+              echo "app_changed=true" >> $GITHUB_OUTPUT
+              echo "📝 App code changes detected"
+            fi
+          fi
+
       - name: Configure AWS credentials
+        if: ${{ steps.check-app-changes.outputs.app_changed == 'true' || github.event.inputs.action == 'update-digest-only' }}
         uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ env.AWS_ROLE_TO_ASSUME }}
           aws-region: ${{ env.AWS_REGION }}
       
       - name: Log in to Amazon ECR
+        if: ${{ steps.check-app-changes.outputs.app_changed == 'true' || github.event.inputs.action == 'update-digest-only' }}
         id: login-ecr
         uses: aws-actions/amazon-ecr-login@v2
-      
-      - name: Extract short SHA
-        if: ${{ github.event.inputs.action == 'build-and-push' }}
-        id: vars
-        run: echo "sha_short=$(echo $GITHUB_SHA | cut -c1-7)" >> $GITHUB_OUTPUT
-      
-      - name: Set image tagging variables
-        if: ${{ github.event.inputs.action == 'build-and-push' }}
+
+      - name: Set up Docker Buildx
+        if: ${{ steps.check-app-changes.outputs.app_changed == 'true' }}
+        uses: docker/setup-buildx-action@v3
+
+      - name: Extract metadata
+        if: ${{ steps.check-app-changes.outputs.app_changed == 'true' }}
+        id: meta
         run: |
+          SHA_SHORT=$(echo $GITHUB_SHA | cut -c1-7)
           IMAGE_BASE="${{ env.ECR_REPOSITORY_FRONTEND }}"
-          TAG="${{ github.run_id }}-${{ steps.vars.outputs.sha_short }}"
+          TAG="${{ github.run_id }}-${SHA_SHORT}"
           IMAGE_URI="${IMAGE_BASE}:${TAG}"
-          echo "IMAGE_BASE=$IMAGE_BASE" >> $GITHUB_ENV
-          echo "TAG=$TAG" >> $GITHUB_ENV
-          echo "IMAGE_URI=$IMAGE_URI" >> $GITHUB_ENV
+          
+          echo "image_base=$IMAGE_BASE" >> $GITHUB_OUTPUT
+          echo "tag=$TAG" >> $GITHUB_OUTPUT
+          echo "image_uri=$IMAGE_URI" >> $GITHUB_OUTPUT
+          echo "sha_short=$SHA_SHORT" >> $GITHUB_OUTPUT
       
-      - name: Build and push Docker image
-        if: ${{ github.event.inputs.action == 'build-and-push' }}
-        run: |
-          docker build --no-cache -t "$IMAGE_URI" .
-          docker push "$IMAGE_URI"
+      - name: Build and push Docker image with cache
+        if: ${{ steps.check-app-changes.outputs.app_changed == 'true' }}
+        uses: docker/build-push-action@v5
+        with:
+          context: app/frontend
+          push: true
+          tags: ${{ steps.meta.outputs.image_uri }}
+          cache-from: type=registry,ref=${{ env.ECR_REPOSITORY_FRONTEND }}:buildcache
+          cache-to: type=registry,ref=${{ env.ECR_REPOSITORY_FRONTEND }}:buildcache,mode=max
+          platforms: linux/amd64
       
       - name: Capture image digest
         id: digest
         run: |
-          if [ "${{ github.event.inputs.action }}" == "build-and-push" ]; then
-            DIGEST=$(docker inspect --format='{{index .RepoDigests 0}}' "$IMAGE_URI")
-            DIGEST_ONLY=$(echo "$DIGEST" | cut -d@ -f2)
+          if [ "${{ steps.check-app-changes.outputs.app_changed }}" == "true" ]; then
+            # Get digest from newly built image
+            DIGEST=$(aws ecr describe-images \
+              --repository-name $(basename ${{ env.ECR_REPOSITORY_FRONTEND }}) \
+              --region ${{ env.AWS_REGION }} \
+              --image-ids imageTag=${{ steps.meta.outputs.tag }} \
+              --query 'imageDetails[0].imageDigest' \
+              --output text)
+            echo "digest=${{ steps.meta.outputs.image_uri }}@${DIGEST}" >> $GITHUB_OUTPUT
+            echo "digest_only=${DIGEST}" >> $GITHUB_OUTPUT
+            echo "✅ New image built: ${{ steps.meta.outputs.tag }}"
           else
-            # Get latest image from ECR
-            LATEST_IMAGE=$(aws ecr describe-images --repository-name $(basename ${{ env.ECR_REPOSITORY_FRONTEND }}) --region ${{ env.AWS_REGION }} --query 'sort_by(imageDetails,&imagePushedAt)[-1].imageDigest' --output text)
-            DIGEST_ONLY="$LATEST_IMAGE"
+            # Get latest image from ECR (no build needed)
+            LATEST_DIGEST=$(aws ecr describe-images \
+              --repository-name $(basename ${{ env.ECR_REPOSITORY_FRONTEND }}) \
+              --region ${{ env.AWS_REGION }} \
+              --query 'sort_by(imageDetails,&imagePushedAt)[-1].imageDigest' \
+              --output text)
+            echo "digest_only=${LATEST_DIGEST}" >> $GITHUB_OUTPUT
+            echo "ℹ️ Using existing latest image"
           fi
-          echo "digest=$DIGEST" >> $GITHUB_OUTPUT
-          echo "digest_only=$DIGEST_ONLY" >> $GITHUB_OUTPUT
       
-      - name: Check if digest changed
+      - name: Check if digest changed in GitOps
         id: check-changes
         env:
           GH_TOKEN: "${{ env.GH_TOKEN }}"
@@ -125,10 +176,10 @@ jobs:
           
           if [ "$CURRENT_DIGEST" == "$NEW_DIGEST" ]; then
             echo "changed=false" >> $GITHUB_OUTPUT
-            echo "No digest change detected. Current: $CURRENT_DIGEST"
+            echo "✅ Digest unchanged: $CURRENT_DIGEST"
           else
             echo "changed=true" >> $GITHUB_OUTPUT
-            echo "Digest changed. Current: $CURRENT_DIGEST -> New: $NEW_DIGEST"
+            echo "🔄 Digest changed: $CURRENT_DIGEST → $NEW_DIGEST"
           fi
 
       - name: Update GitOps repository
@@ -166,9 +217,9 @@ jobs:
           echo "pr_number=$PR_NUMBER" >> $GITHUB_OUTPUT
           
           if [ "$PR_NUMBER" != "null" ] && [ -n "$PR_NUMBER" ]; then
-            echo "Created PR #${PR_NUMBER}"
+            echo "✅ Created PR #${PR_NUMBER}"
           else
-            echo "Failed to create PR. Response: $PR_RESPONSE"
+            echo "❌ Failed to create PR. Response: $PR_RESPONSE"
             exit 1
           fi
       
@@ -181,27 +232,34 @@ jobs:
           PR_NUMBER="${{ steps.create-pr.outputs.pr_number }}"
           
           if [ -n "$PR_NUMBER" ] && [ "$PR_NUMBER" != "null" ]; then
-            echo "Triggering auto-merge for PR #${PR_NUMBER}..."
+            echo "🔀 Triggering auto-merge for PR #${PR_NUMBER}..."
             
-            # Trigger the auto-merge workflow via repository_dispatch
             curl -X POST \
               -H "Authorization: Bearer ${GH_TOKEN}" \
               -H "Accept: application/vnd.github+json" \
               "https://api.github.com/repos/${GITOPS_REPO}/dispatches" \
               -d "{\"event_type\":\"auto-merge-pr\",\"client_payload\":{\"pr_number\":${PR_NUMBER}}}"
             
-            echo "Auto-merge workflow triggered for PR #${PR_NUMBER}"
+            echo "✅ Auto-merge workflow triggered for PR #${PR_NUMBER}"
           else
-            echo "No PR found to auto-merge"
+            echo "❌ No PR found to auto-merge"
           fi
       
-      - name: Output summary
+      - name: Build Summary
         run: |
+          echo "## 🚀 Build Summary" >> $GITHUB_STEP_SUMMARY
+          echo "- **Environment:** ${{ github.event.inputs.env }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Action:** ${{ github.event.inputs.action }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **App Changed:** ${{ steps.check-app-changes.outputs.app_changed }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Digest Changed:** ${{ steps.check-changes.outputs.changed }}" >> $GITHUB_STEP_SUMMARY
+          
+          if [ "${{ steps.check-app-changes.outputs.app_changed }}" == "true" ]; then
+            echo "- **New Image:** ${{ steps.meta.outputs.tag }}" >> $GITHUB_STEP_SUMMARY
+          fi
+          
           if [ "${{ steps.check-changes.outputs.changed }}" == "true" ]; then
-            echo "Frontend image digest updated:"
-            echo "- New digest: ${{ steps.digest.outputs.digest_only }}"
-            echo "- PR: #${{ steps.create-pr.outputs.pr_number }}"
-            echo "- Auto-merge: ${{ github.event.inputs.auto_merge }}"
+            echo "- **PR Created:** #${{ steps.create-pr.outputs.pr_number }}" >> $GITHUB_STEP_SUMMARY
+            echo "- **Auto-merge:** ${{ github.event.inputs.auto_merge }}" >> $GITHUB_STEP_SUMMARY
           else
-            echo "No changes detected - digest already up to date"
+            echo "- **Result:** No changes needed - everything up to date ✅" >> $GITHUB_STEP_SUMMARY
           fi
