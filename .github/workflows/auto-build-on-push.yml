@@ -1,0 +1,71 @@
+# .github/workflows/auto-build-on-push.yml
+
+name: Auto Build on Code Changes
+
+on:
+  push:
+    branches: 
+      - main
+      - develop
+    paths:
+      - 'app/**'
+      - 'helm/**'
+      - 'Dockerfile'
+  
+  pull_request:
+    types: [closed]
+    branches:
+      - main
+    paths:
+      - 'app/**'
+      - 'helm/**'
+      - 'Dockerfile'
+
+  repository_dispatch:
+    types: [terraform-infrastructure-ready]
+
+jobs:
+  auto-build:
+    runs-on: ubuntu-latest
+    # Only run on pushes to main or when PR is merged to main
+    if: |
+      (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
+      (github.event_name == 'pull_request' && github.event.pull_request.merged == true) ||
+      (github.event_name == 'repository_dispatch')
+    
+    steps:
+      - name: Determine environment and action
+        id: config
+        run: |
+          if [ "${{ github.event_name }}" == "repository_dispatch" ]; then
+            # Triggered by Terraform
+            ENV="${{ github.event.client_payload.environment }}"
+            ACTION="build-and-push"
+            REASON="terraform-infrastructure-ready"
+          else
+            # Triggered by code changes
+            ENV="dev"  # Default to dev for auto-builds
+            ACTION="build-and-push"
+            REASON="code-changes"
+          fi
+          
+          echo "environment=$ENV" >> $GITHUB_OUTPUT
+          echo "action=$ACTION" >> $GITHUB_OUTPUT
+          echo "reason=$REASON" >> $GITHUB_OUTPUT
+          
+          echo "🚀 Auto-build triggered by: $REASON"
+          echo "📦 Building for environment: $ENV"
+
+      - name: Call Frontend Deploy Workflow
+        uses: ./.github/workflows/frontend-deploy.yml
+        with:
+          env: ${{ steps.config.outputs.environment }}
+          action: ${{ steps.config.outputs.action }}
+          auto_merge: true
+
+      - name: Build Summary
+        run: |
+          echo "✅ Auto-build completed"
+          echo "Trigger: ${{ steps.config.outputs.reason }}"
+          echo "Environment: ${{ steps.config.outputs.environment }}"
+          echo "Action: ${{ steps.config.outputs.action }}"
