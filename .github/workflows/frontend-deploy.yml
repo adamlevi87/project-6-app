@@ -24,6 +24,7 @@ on:
         required: false
         default: true
         type: boolean
+
 jobs:
   build-and-deploy:
     runs-on: ubuntu-latest
@@ -132,6 +133,7 @@ jobs:
 
       - name: Update GitOps repository
         if: ${{ steps.check-changes.outputs.changed == 'true' }}
+        id: create-pr
         env:
           GH_TOKEN: "${{ env.GH_TOKEN }}"
           GITOPS_REPO: ${{ env.GITOPS_REPO }}
@@ -143,6 +145,8 @@ jobs:
           git config user.email "actions@github.com"
           
           BRANCH_NAME="frontend-update-$(date +%Y%m%d-%H%M%S)"
+          echo "branch_name=$BRANCH_NAME" >> $GITHUB_OUTPUT
+          
           git checkout -b "$BRANCH_NAME"
           
           sed -i "s|digest: \"sha256:.*\"|digest: \"${NEW_DIGEST}\"|g" environments/${ENVIRONMENT}/manifests/frontend/digest-values.yaml
@@ -150,12 +154,23 @@ jobs:
           git commit -m "Update frontend digest for ${ENVIRONMENT}: ${NEW_DIGEST}"
           git push origin "$BRANCH_NAME"
           
-          # Create PR
-          curl -X POST \
+          # Create PR and capture response
+          PR_RESPONSE=$(curl -s -X POST \
             -H "Authorization: Bearer ${GH_TOKEN}" \
             -H "Accept: application/vnd.github+json" \
             "https://api.github.com/repos/${GITOPS_REPO}/pulls" \
-            -d "{\"title\":\"Frontend: Update ${ENVIRONMENT} digest\",\"head\":\"${BRANCH_NAME}\",\"base\":\"main\"}"
+            -d "{\"title\":\"Frontend: Update ${ENVIRONMENT} digest\",\"head\":\"${BRANCH_NAME}\",\"base\":\"main\",\"body\":\"Automated digest update for ${ENVIRONMENT} environment\"}")
+          
+          # Extract PR number
+          PR_NUMBER=$(echo "$PR_RESPONSE" | jq -r '.number')
+          echo "pr_number=$PR_NUMBER" >> $GITHUB_OUTPUT
+          
+          if [ "$PR_NUMBER" != "null" ] && [ -n "$PR_NUMBER" ]; then
+            echo "Created PR #${PR_NUMBER}"
+          else
+            echo "Failed to create PR. Response: $PR_RESPONSE"
+            exit 1
+          fi
       
       - name: Auto-merge GitOps PR
         if: ${{ steps.check-changes.outputs.changed == 'true' && github.event.inputs.auto_merge == 'true' }}
@@ -163,12 +178,7 @@ jobs:
           GH_TOKEN: "${{ env.GH_TOKEN }}"
           GITOPS_REPO: ${{ env.GITOPS_REPO }}
         run: |
-          # Extract PR number from the previous step's PR creation
-          cd gitops-repo
-          
-          # Get the latest PR number for this branch
-          BRANCH_NAME="frontend-update-$(date +%Y%m%d-%H%M%S)"
-          PR_NUMBER=$(gh pr list --repo ${GITOPS_REPO} --head ${BRANCH_NAME} --json number --jq '.[0].number')
+          PR_NUMBER="${{ steps.create-pr.outputs.pr_number }}"
           
           if [ -n "$PR_NUMBER" ] && [ "$PR_NUMBER" != "null" ]; then
             echo "Triggering auto-merge for PR #${PR_NUMBER}..."
@@ -187,5 +197,11 @@ jobs:
       
       - name: Output summary
         run: |
-          echo "Frontend image built and pushed:"
-          echo "- Image: ${{ steps.digest.outputs.digest }}"
+          if [ "${{ steps.check-changes.outputs.changed }}" == "true" ]; then
+            echo "Frontend image digest updated:"
+            echo "- New digest: ${{ steps.digest.outputs.digest_only }}"
+            echo "- PR: #${{ steps.create-pr.outputs.pr_number }}"
+            echo "- Auto-merge: ${{ github.event.inputs.auto_merge }}"
+          else
+            echo "No changes detected - digest already up to date"
+          fi
