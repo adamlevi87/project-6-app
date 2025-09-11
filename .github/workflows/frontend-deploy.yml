@@ -156,7 +156,35 @@ jobs:
             -H "Accept: application/vnd.github+json" \
             "https://api.github.com/repos/${GITOPS_REPO}/pulls" \
             -d "{\"title\":\"Frontend: Update ${ENVIRONMENT} digest\",\"head\":\"${BRANCH_NAME}\",\"base\":\"main\"}"
-
+      
+      - name: Auto-merge GitOps PR
+        if: ${{ steps.check-changes.outputs.changed == 'true' && github.event.inputs.auto_merge == 'true' }}
+        env:
+          GH_TOKEN: "${{ env.GH_TOKEN }}"
+          GITOPS_REPO: ${{ env.GITOPS_REPO }}
+        run: |
+          # Extract PR number from the previous step's PR creation
+          cd gitops-repo
+          
+          # Get the latest PR number for this branch
+          BRANCH_NAME="frontend-update-$(date +%Y%m%d-%H%M%S)"
+          PR_NUMBER=$(gh pr list --repo ${GITOPS_REPO} --head ${BRANCH_NAME} --json number --jq '.[0].number')
+          
+          if [ -n "$PR_NUMBER" ] && [ "$PR_NUMBER" != "null" ]; then
+            echo "Triggering auto-merge for PR #${PR_NUMBER}..."
+            
+            # Trigger the auto-merge workflow via repository_dispatch
+            curl -X POST \
+              -H "Authorization: Bearer ${GH_TOKEN}" \
+              -H "Accept: application/vnd.github+json" \
+              "https://api.github.com/repos/${GITOPS_REPO}/dispatches" \
+              -d "{\"event_type\":\"auto-merge-pr\",\"client_payload\":{\"pr_number\":${PR_NUMBER}}}"
+            
+            echo "Auto-merge workflow triggered for PR #${PR_NUMBER}"
+          else
+            echo "No PR found to auto-merge"
+          fi
+      
       - name: Output summary
         run: |
           echo "Frontend image built and pushed:"
