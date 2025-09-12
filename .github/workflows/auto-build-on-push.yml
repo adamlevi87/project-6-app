@@ -24,6 +24,10 @@ on:
   repository_dispatch:
     types: [terraform-infrastructure-ready]
 
+permissions:
+  contents: read
+  actions: write
+
 jobs:
   auto-build:
     runs-on: ubuntu-latest
