@@ -56,12 +56,20 @@ jobs:
           echo "🚀 Auto-build triggered by: $REASON"
           echo "📦 Building for environment: $ENV"
 
-      - name: Call Frontend Deploy Workflow
-        uses: ./.github/workflows/frontend-deploy.yml
-        with:
-          env: ${{ steps.config.outputs.environment }}
-          action: ${{ steps.config.outputs.action }}
-          auto_merge: true
+      - name: Trigger Frontend Deploy Workflow  
+        run: |
+          curl -X POST \
+            -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${{ github.repository }}/actions/workflows/frontend-deploy.yml/dispatches" \
+            -d '{
+              "ref": "main",
+              "inputs": {
+                "env": "${{ steps.config.outputs.environment }}",
+                "action": "${{ steps.config.outputs.action }}",
+                "auto_merge": "true"
+              }
+            }'
 
       - name: Build Summary
         run: |
