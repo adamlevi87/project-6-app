@@ -58,7 +58,9 @@ jobs:
 
       - name: Trigger Frontend Deploy Workflow  
         run: |
-          curl -X POST \
+          echo "Triggering frontend-deploy.yml workflow..."
+          
+          RESPONSE=$(curl -s -w "\nHTTP_CODE:%{http_code}" -X POST \
             -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
             -H "Accept: application/vnd.github+json" \
             "https://api.github.com/repos/${{ github.repository }}/actions/workflows/frontend-deploy.yml/dispatches" \
@@ -69,7 +71,21 @@ jobs:
                 "action": "${{ steps.config.outputs.action }}",
                 "auto_merge": "true"
               }
-            }'
+            }')
+          
+          HTTP_CODE=$(echo "$RESPONSE" | grep "HTTP_CODE:" | cut -d: -f2)
+          BODY=$(echo "$RESPONSE" | sed '/HTTP_CODE:/d')
+          
+          echo "HTTP Code: $HTTP_CODE"
+          echo "Response Body: $BODY"
+          
+          if [ "$HTTP_CODE" -eq 204 ]; then
+            echo "✅ Workflow triggered successfully"
+          else
+            echo "❌ Failed to trigger workflow"
+            echo "Response: $BODY"
+            exit 1
+          fi
 
       - name: Build Summary
         run: |
