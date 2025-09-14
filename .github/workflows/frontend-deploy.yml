@@ -132,6 +132,8 @@ jobs:
           cache-from: type=registry,ref=${{ env.ECR_REPOSITORY_FRONTEND }}:buildcache
           cache-to: type=registry,ref=${{ env.ECR_REPOSITORY_FRONTEND }}:buildcache,mode=max
           platforms: linux/amd64
+          provenance: false
+          sbom: false
       
       - name: Capture image digest
         id: digest
