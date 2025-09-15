@@ -311,7 +311,7 @@ jobs:
           # no condition, if there are no digest the job fails anyway
           echo "- **ECR Digest Prior to the changes:** ${{ steps.ecr-check.outputs.existing_digest }}" >> $GITHUB_STEP_SUMMARY
           
-          # If push = true-> print the new digest which is the final digest
+          # If there were changes (meaning push = true)-> print the new digest which is the final digest
           if [ "${{ steps.push-decision.outputs.should_push }}" == "true" ]; then
             echo "- **ECR Digest after the changes:** ${{ steps.final-digest.outputs.digest_only }}" >> $GITHUB_STEP_SUMMARY
           fi
