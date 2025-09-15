@@ -311,8 +311,15 @@ jobs:
           echo "- **Strategy:** ${{ steps.build-strategy.outputs.strategy }}" >> $GITHUB_STEP_SUMMARY
           echo "- **Action:** ${{ github.event.inputs.action }}" >> $GITHUB_STEP_SUMMARY
           
+          # Add ECR digest info when available
+          if [ "${{ steps.build-strategy.outputs.should_compare_digest }}" == "true" ]; then
+            echo "- **ECR Manifest Digest:** ${{ steps.ecr-latest.outputs.latest_manifest_digest }}" >> $GITHUB_STEP_SUMMARY
+            echo "- **ECR Config Digest:** ${{ steps.ecr-latest.outputs.latest_config_digest }}" >> $GITHUB_STEP_SUMMARY
+          fi
+          
           if [ "${{ steps.build-strategy.outputs.should_build }}" == "true" ]; then
             echo "- **Built Image:** ${{ steps.meta.outputs.tag }}" >> $GITHUB_STEP_SUMMARY
+            echo "- **Local Config Digest:** ${{ steps.local-digest.outputs.local_digest }}" >> $GITHUB_STEP_SUMMARY
             echo "- **Pushed to ECR:** ${{ steps.push-decision.outputs.should_push }}" >> $GITHUB_STEP_SUMMARY
           fi
           
