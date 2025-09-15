@@ -84,26 +84,40 @@ jobs:
         run: |
           if [ "${{ github.event.inputs.action }}" == "force-rebuild" ]; then
             echo "should_build=true" >> $GITHUB_OUTPUT
-            echo "should_compare_image=false" >> $GITHUB_OUTPUT
+            echo "should_compare_digest=false" >> $GITHUB_OUTPUT
             echo "strategy=force" >> $GITHUB_OUTPUT
             echo "🔨 Force rebuild - will build and push regardless"
           elif [ "${{ github.event.inputs.action }}" == "update-digest-only" ]; then
-            if ! aws ecr describe-images --repository-name $(basename ${{ env.ECR_REPOSITORY_FRONTEND }}) --region ${{ env.AWS_REGION }} > /dev/null 2>&1; then
-              echo "❌ ERROR: update-digest-only requires existing images in ECR"
-              exit 1
-            fi
             echo "should_build=false" >> $GITHUB_OUTPUT
-            echo "should_compare_image=false" >> $GITHUB_OUTPUT
+            echo "should_compare_digest=true" >> $GITHUB_OUTPUT
             echo "strategy=digest-only" >> $GITHUB_OUTPUT
             echo "📦 Update digest only - skipping build entirely"
           elseif [ "${{ github.event.inputs.action }}" == "build-and-push" ]; then
             echo "should_build=true" >> $GITHUB_OUTPUT
-            echo "should_compare_image=true" >> $GITHUB_OUTPUT
+            echo "should_compare_digest=true" >> $GITHUB_OUTPUT
             echo "strategy=smart" >> $GITHUB_OUTPUT
             echo "🧠 Smart build - will build, compare, and conditionally push"
           else
             echo "🧠 Smart build - will do nothing"
           fi
+
+      - name: Get latest ECR image digest
+        if: ${{ steps.build-strategy.outputs.should_compare_digest == 'true' }}
+        id: ecr-latest
+        run: |
+          LATEST_DIGEST=$(aws ecr describe-images \
+            --repository-name $(basename ${{ env.ECR_REPOSITORY_FRONTEND }}) \
+            --region ${{ env.AWS_REGION }} \
+            --query 'sort_by(imageDetails,&imagePushedAt)[-1].imageDigest' \
+            --output text 2>/dev/null || echo "none")
+          
+          if [ "$LATEST_DIGEST" == "none" ] && [ "${{ github.event.inputs.action }}" == "update-digest-only" ]; then
+            echo "❌ ERROR: update-digest-only requires existing images in ECR"
+            exit 1
+          fi
+          
+          echo "latest_digest=$LATEST_DIGEST" >> $GITHUB_OUTPUT
+          echo "📋 Latest ECR digest: $LATEST_DIGEST"
 
       - name: Set up Docker Buildx
         if: ${{ steps.build-strategy.outputs.should_build == 'true' }}
@@ -122,20 +136,6 @@ jobs:
           echo "tag=$TAG" >> $GITHUB_OUTPUT
           echo "image_uri=$IMAGE_URI" >> $GITHUB_OUTPUT
           echo "sha_short=$SHA_SHORT" >> $GITHUB_OUTPUT
-      
-      - name: Get latest ECR image digest (for comparison)
-        if: ${{ steps.build-strategy.outputs.should_compare_image == 'true' }}
-        id: ecr-latest
-        run: |
-          # Get the latest image digest from ECR
-          LATEST_DIGEST=$(aws ecr describe-images \
-            --repository-name $(basename ${{ env.ECR_REPOSITORY_FRONTEND }}) \
-            --region ${{ env.AWS_REGION }} \
-            --query 'sort_by(imageDetails,&imagePushedAt)[-1].imageDigest' \
-            --output text 2>/dev/null || echo "none")
-          
-          echo "latest_digest=$LATEST_DIGEST" >> $GITHUB_OUTPUT
-          echo "📋 Latest ECR digest: $LATEST_DIGEST"
       
       - name: Build Docker image (locally)
         if: ${{ steps.build-strategy.outputs.should_build == 'true' }}
@@ -193,18 +193,7 @@ jobs:
       - name: Capture final image digest
         id: final-digest
         run: |
-          if [ "${{ steps.build-strategy.outputs.strategy }}" == "digest-only" ]; then
-            # Get latest from ECR for digest-only mode
-            # its similar to EXISTING_DIGEST unless
-            # there are no images in the ECR before this run
-            FINAL_DIGEST=$(aws ecr describe-images \
-              --repository-name $(basename ${{ env.ECR_REPOSITORY_FRONTEND }}) \
-              --region ${{ env.AWS_REGION }} \
-              --query 'sort_by(imageDetails,&imagePushedAt)[-1].imageDigest' \
-              --output text)
-            echo "digest_only=$FINAL_DIGEST" >> $GITHUB_OUTPUT
-            echo "📦 Using existing latest digest: $FINAL_DIGEST"
-          elif [ "${{ steps.push-decision.outputs.should_push }}" == "true" ]; then
+          if [ "${{ steps.push-decision.outputs.should_push }}" == "true" ]; then
             # Get digest from newly pushed image
             NEW_DIGEST=$(aws ecr describe-images \
               --repository-name $(basename ${{ env.ECR_REPOSITORY_FRONTEND }}) \
@@ -215,10 +204,9 @@ jobs:
             echo "digest_only=$NEW_DIGEST" >> $GITHUB_OUTPUT
             echo "✅ New image digest: $NEW_DIGEST"
           else
-            # Use the existing latest digest since we didn't push
-            EXISTING_DIGEST="${{ steps.ecr-latest.outputs.latest_digest }}"
-            echo "digest_only=$EXISTING_DIGEST" >> $GITHUB_OUTPUT
-            echo "♻️ Using existing digest: $EXISTING_DIGEST"
+            # Use the existing latest digest (covers both digest-only and no-push scenarios)
+            echo "digest_only=${{ steps.ecr-latest.outputs.latest_digest }}" >> $GITHUB_OUTPUT
+            echo "♻️ Using existing digest: ${{ steps.ecr-latest.outputs.latest_digest }}"
           fi
 
       - name: Check if digest changed in GitOps
@@ -227,20 +215,23 @@ jobs:
           GH_TOKEN: "${{ env.GH_TOKEN }}"
           GITOPS_REPO: ${{ env.GITOPS_REPO }}
           ENVIRONMENT: ${{ github.event.inputs.env }}
-          NEW_DIGEST: ${{ steps.final-digest.outputs.digest_only }}
+          # TARGET_DIGEST is the digest from this workflow
+          # it will be the latest digest from the ECR, if a push was made or not
+          # this needs to be compared to the digest in GitOps
+          TARGET_DIGEST: ${{ steps.final-digest.outputs.digest_only }}
         run: |
           rm -rf gitops-repo
           git clone https://x-access-token:${GH_TOKEN}@github.com/${GITOPS_REPO}.git gitops-repo
           cd gitops-repo
           
-          CURRENT_DIGEST=$(grep 'digest:' environments/${ENVIRONMENT}/manifests/frontend/digest-values.yaml | sed 's/.*digest: "\(.*\)"/\1/')
+          GITOPS_DIGEST=$(grep 'digest:' environments/${ENVIRONMENT}/manifests/frontend/digest-values.yaml | sed 's/.*digest: "\(.*\)"/\1/')
           
-          if [ "$CURRENT_DIGEST" == "$NEW_DIGEST" ]; then
+          if [ "$GITOPS_DIGEST" == "$TARGET_DIGEST" ]; then
             echo "changed=false" >> $GITHUB_OUTPUT
-            echo "✅ GitOps digest unchanged: $CURRENT_DIGEST"
+            echo "✅ GitOps digest unchanged: gitops: $GITOPS_DIGEST vs $TARGET_DIGEST"
           else
             echo "changed=true" >> $GITHUB_OUTPUT
-            echo "🔄 GitOps digest will change: $CURRENT_DIGEST → $NEW_DIGEST"
+            echo "🔄 GitOps digest will change: digest to be replace: $GITOPS_DIGEST → digest to be replaced by: $TARGET_DIGEST"
           fi
 
       - name: Update GitOps repository
@@ -250,7 +241,7 @@ jobs:
           GH_TOKEN: "${{ env.GH_TOKEN }}"
           GITOPS_REPO: ${{ env.GITOPS_REPO }}
           ENVIRONMENT: ${{ github.event.inputs.env }}
-          NEW_DIGEST: ${{ steps.final-digest.outputs.digest_only }}
+          TARGET_DIGEST: ${{ steps.final-digest.outputs.digest_only }}
         run: |
           cd gitops-repo
           git config user.name "GitHub Actions"
@@ -261,9 +252,9 @@ jobs:
           
           git checkout -b "$BRANCH_NAME"
           
-          sed -i "s|digest: \"sha256:.*\"|digest: \"${NEW_DIGEST}\"|g" environments/${ENVIRONMENT}/manifests/frontend/digest-values.yaml
+          sed -i "s|digest: \"sha256:.*\"|digest: \"${TARGET_DIGEST}\"|g" environments/${ENVIRONMENT}/manifests/frontend/digest-values.yaml
           git add environments/${ENVIRONMENT}/manifests/frontend/digest-values.yaml
-          git commit -m "Update frontend digest for ${ENVIRONMENT}: ${NEW_DIGEST}"
+          git commit -m "Update frontend digest for ${ENVIRONMENT}: ${TARGET_DIGEST}"
           git push origin "$BRANCH_NAME"
           
           # Create PR and capture response
@@ -326,4 +317,3 @@ jobs:
           else
             echo "- **Result:** No changes needed - everything up to date ✅" >> $GITHUB_STEP_SUMMARY
           fi
-          
