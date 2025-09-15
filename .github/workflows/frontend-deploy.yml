@@ -134,6 +134,17 @@ jobs:
           echo "image_uri=$IMAGE_URI" >> $GITHUB_OUTPUT
           echo "sha_short=$SHA_SHORT" >> $GITHUB_OUTPUT
       
+      - name: Debug build context
+        run: |
+          echo "=== Files and timestamps ==="
+          find . -type f -exec stat {} \; | head -20
+          
+          echo "=== File hashes ==="
+          find . -type f -exec sha256sum {} \; | sort
+          
+          echo "=== Docker version ==="
+          docker version
+
       - name: Build Docker image (locally)
         if: ${{ steps.build-strategy.outputs.should_build == 'true' }}
         id: build
@@ -165,8 +176,8 @@ jobs:
           elif [ "${{ steps.ecr-latest.outputs.latest_digest }}" != "${{ steps.local-digest.outputs.local_digest }}" ]; then
             echo "should_push=true" >> $GITHUB_OUTPUT
             echo "📝 Image changed - config digests differ:"
-            echo "  ECR Config:   ${{ steps.ecr-latest.outputs.latest_digest }}"
-            echo "  Local Config: ${{ steps.local-digest.outputs.local_digest }}"
+            echo "  ECR digest:   ${{ steps.ecr-latest.outputs.latest_digest }}"
+            echo "  Local digest: ${{ steps.local-digest.outputs.local_digest }}"
           else
             echo "should_push=false" >> $GITHUB_OUTPUT
             echo "✅ Image unchanged - config digests match, skipping push"
@@ -300,7 +311,7 @@ jobs:
           
           if [ "${{ steps.build-strategy.outputs.should_build }}" == "true" ]; then
             echo "- **Built Image:** ${{ steps.meta.outputs.tag }}" >> $GITHUB_STEP_SUMMARY
-            echo "- **Local Config Digest:** ${{ steps.local-digest.outputs.local_digest }}" >> $GITHUB_STEP_SUMMARY
+            echo "- **Local Digest:** ${{ steps.local-digest.outputs.local_digest }}" >> $GITHUB_STEP_SUMMARY
             echo "- **Pushed to ECR:** ${{ steps.push-decision.outputs.should_push }}" >> $GITHUB_STEP_SUMMARY
           fi
           
