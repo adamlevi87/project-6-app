@@ -69,16 +69,6 @@ jobs:
               ;;
           esac
 
-      - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          role-to-assume: ${{ env.AWS_ROLE_TO_ASSUME }}
-          aws-region: ${{ env.AWS_REGION }}
-      
-      - name: Log in to Amazon ECR
-        id: login-ecr
-        uses: aws-actions/amazon-ecr-login@v2
-
       - name: Determine build strategy
         id: build-strategy
         run: |
@@ -100,6 +90,16 @@ jobs:
           else
             echo "🧠 Smart build - will do nothing"
           fi
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.AWS_ROLE_TO_ASSUME }}
+          aws-region: ${{ env.AWS_REGION }}
+      
+      - name: Log in to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
 
       - name: Get latest ECR image digest (for comparison)
         if: ${{ steps.build-strategy.outputs.should_compare_digest == 'true' }}
@@ -134,49 +134,57 @@ jobs:
           echo "image_uri=$IMAGE_URI" >> $GITHUB_OUTPUT
           echo "sha_short=$SHA_SHORT" >> $GITHUB_OUTPUT
       
+      # Step 1: Calculate content hash
       - name: Get content hash
+        id: content-hash
         run: |
           CONTENT_HASH=$(find . -type f -exec sha256sum {} \; | sort | sha256sum | cut -d' ' -f1)
           echo "content_hash=$CONTENT_HASH" >> $GITHUB_OUTPUT
           echo "📝 Content hash: $CONTENT_HASH"
 
-      - name: Build Docker image (locally)
-        if: ${{ steps.build-strategy.outputs.should_build == 'true' }}
-        id: build
+      # Step 2: Get content hash from latest ECR image
+      - name: Check if content exists in ECR
+        if: ${{ steps.build-strategy.outputs.should_compare_digest == 'true' }}
+        id: ecr-check
         run: |
+          LATEST_TAGS=$(aws ecr describe-images \
+            --repository-name $(basename ${{ env.ECR_REPOSITORY_FRONTEND }}) \
+            --region ${{ env.AWS_REGION }} \
+            --query 'sort_by(imageDetails,&imagePushedAt)[-1].imageTags' \
+            --output json 2>/dev/null || echo "[]")
           
-          docker build -t ${{ steps.meta.outputs.image_uri }} .
-          docker save ${{ steps.meta.outputs.image_uri }} -o /tmp/image.tar
-          echo "✅ Image built and saved"
+          if [ "$LATEST_TAGS" == "[]" ] && [ "${{ github.event.inputs.action }}" == "update-digest-only" ]; then
+            echo "❌ ERROR: update-digest-only requires existing images in ECR"
+            exit 1
+          fi
 
-      - name: Get local image digest  
-        if: ${{ steps.build-strategy.outputs.should_build == 'true' }}
-        id: local-digest
+          echo "latest_digest=$LATEST_TAGS" >> $GITHUB_OUTPUT
+          echo "📋 Latest ECR digest: $LATEST_TAGS" 
+
+      # Step 3: Build with content hash label
+      - name: Build Docker image with content hash
         run: |
-          LOCAL_DIGEST=$(docker image inspect ${{ steps.meta.outputs.image_uri }} --format='{{.Id}}')
+          docker build -t ${{ steps.meta.outputs.image_uri }} .
 
-          echo "local_digest=$LOCAL_DIGEST" >> $GITHUB_OUTPUT
-          echo "🔍 Local image digest: $LOCAL_DIGEST"
+      - name: Build Docker image
+        if: ${{ steps.build-strategy.outputs.should_build == 'true' }}
+        run: |
+          docker build -t ${{ steps.meta.outputs.image_uri }} .
+          echo "✅ Image built"
 
-
-      - name: Compare digests and decide to push
+      - name: Compare content and decide to push
         if: ${{ steps.build-strategy.outputs.should_build == 'true' }}
         id: push-decision
         run: |
           if [ "${{ steps.build-strategy.outputs.strategy }}" == "force" ]; then
             echo "should_push=true" >> $GITHUB_OUTPUT
             echo "🔨 Force push requested"
-          elif [ "${{ steps.ecr-latest.outputs.latest_digest }}" == "none" ]; then
+          elif ! echo "${{ steps.ecr-check.outputs.latest_tags }}" | jq -e --arg tag "content-${{ steps.content-hash.outputs.content_hash }}" 'index($tag)' >/dev/null; then
             echo "should_push=true" >> $GITHUB_OUTPUT
-            echo "🆕 No existing image in ECR - pushing first image"
-          elif [ "${{ steps.ecr-latest.outputs.latest_digest }}" != "${{ steps.local-digest.outputs.local_digest }}" ]; then
-            echo "should_push=true" >> $GITHUB_OUTPUT
-            echo "📝 Image changed - config digests differ:"
-            echo "  ECR digest:   ${{ steps.ecr-latest.outputs.latest_digest }}"
-            echo "  Local digest: ${{ steps.local-digest.outputs.local_digest }}"
+            echo "🆕 Content not in ECR - pushing new content"
           else
             echo "should_push=false" >> $GITHUB_OUTPUT
-            echo "✅ Image unchanged - config digests match, skipping push"
+            echo "✅ Content unchanged - already exists in ECR, skipping push"
           fi
 
       # - name: Push Docker image to ECR
