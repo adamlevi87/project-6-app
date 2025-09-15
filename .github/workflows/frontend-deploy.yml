@@ -106,14 +106,15 @@ jobs:
         id: meta
         run: |
           SHA_SHORT=$(echo $GITHUB_SHA | cut -c1-7)
-          IMAGE_BASE="${{ env.ECR_REPOSITORY_FRONTEND }}"
           TAG="${{ github.run_id }}-${SHA_SHORT}"
+          IMAGE_BASE="${{ env.ECR_REPOSITORY_FRONTEND }}"
           IMAGE_URI="${IMAGE_BASE}:${TAG}"
           
-          echo "image_base=$IMAGE_BASE" >> $GITHUB_OUTPUT
           echo "tag=$TAG" >> $GITHUB_OUTPUT
           echo "image_uri=$IMAGE_URI" >> $GITHUB_OUTPUT
-          echo "sha_short=$SHA_SHORT" >> $GITHUB_OUTPUT
+
+          #echo "image_base=$IMAGE_BASE" >> $GITHUB_OUTPUT
+          #echo "sha_short=$SHA_SHORT" >> $GITHUB_OUTPUT
       
       # Step 1: Calculate content hash
       - name: Get content hash
@@ -130,25 +131,31 @@ jobs:
         run: |
           CONTENT_TAG="content-${{ steps.content-hash.outputs.content_hash }}"
           
-          LATEST_TAGS=$(aws ecr describe-images \
+          LATEST_IMAGE=$(aws ecr describe-images \
             --repository-name $(basename ${{ env.ECR_REPOSITORY_FRONTEND }}) \
             --region ${{ env.AWS_REGION }} \
-            --query 'sort_by(imageDetails,&imagePushedAt)[-1].imageTags' \
-            --output json 2>/dev/null || echo "[]")
+            --query 'sort_by(imageDetails,&imagePushedAt)[-1]' \
+            --output json 2>/dev/null || echo "{}")
         
-          if [ "$LATEST_TAGS" == "[]" ] && [ "${{ github.event.inputs.action }}" == "update-digest-only" ]; then
+          if [ "$LATEST_IMAGE" == "{}" ] && [ "${{ github.event.inputs.action }}" == "update-digest-only" ]; then
             echo "❌ ERROR: update-digest-only requires existing images in ECR"
             exit 1
           fi
           
+          LATEST_TAGS=$(echo "$LATEST_IMAGE" | jq -r '.imageTags // []')
+          LATEST_DIGEST=$(echo "$LATEST_IMAGE" | jq -r '.imageDigest // ""')
+
           # Check if our content tag exists in latest image
           if echo "$LATEST_TAGS" | jq -e --arg tag "$CONTENT_TAG" 'index($tag)' >/dev/null; then
             echo "content_exists=true" >> $GITHUB_OUTPUT
             echo "✅ Content tag found: $CONTENT_TAG"
+            echo "We will NOT be pushing it to the ecr"
+
+            echo "existing_digest=$LATEST_DIGEST" >> $GITHUB_OUTPUT
           else
             echo "content_exists=false" >> $GITHUB_OUTPUT
             echo "🆕 Content tag not found: $CONTENT_TAG"
-            echo "We will be pushing it"
+            echo "We will be pushing it to the ecr"
           fi
 
       # Step 3: Build with content hash
@@ -199,8 +206,8 @@ jobs:
             echo "✅ New image digest: $NEW_DIGEST"
           else
             # Use the existing latest digest (covers both digest-only and no-push scenarios)
-            echo "digest_only=${{ steps.ecr-latest.outputs.latest_digest }}" >> $GITHUB_OUTPUT
-            echo "♻️ Using existing digest: ${{ steps.ecr-latest.outputs.latest_digest }}"
+            echo "digest_only=${{ steps.ecr-check.outputs.existing_digest }}" >> $GITHUB_OUTPUT
+            echo "♻️ Using existing digest: ${{ steps.ecr-check.outputs.existing_digest }}"
           fi
 
       - name: Check if digest changed in GitOps
@@ -300,7 +307,7 @@ jobs:
           
           # Add ECR digest info when available
           if [ "${{ steps.build-strategy.outputs.should_compare_digest }}" == "true" ]; then
-            echo "- **ECR Digest:** ${{ steps.ecr-latest.outputs.latest_digest }}" >> $GITHUB_STEP_SUMMARY
+            echo "- **ECR Digest:** ${{ steps.ecr-check.outputs.latest_digest }}" >> $GITHUB_STEP_SUMMARY
           fi
           
           if [ "${{ steps.build-strategy.outputs.should_build }}" == "true" ]; then
