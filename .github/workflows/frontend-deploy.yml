@@ -307,20 +307,20 @@ jobs:
           
           # Add ECR digest info when available
           if [ "${{ steps.build-strategy.outputs.should_compare_digest }}" == "true" ]; then
-            echo "- **ECR Digest:** ${{ steps.ecr-check.outputs.latest_digest }}" >> $GITHUB_STEP_SUMMARY
+            echo "- **ECR Digest:** ${{ steps.ecr-check.outputs.existing_digest }}" >> $GITHUB_STEP_SUMMARY
           fi
           
           if [ "${{ steps.build-strategy.outputs.should_build }}" == "true" ]; then
             echo "- **Built Image:** ${{ steps.meta.outputs.tag }}" >> $GITHUB_STEP_SUMMARY
-            echo "- **Local Digest:** ${{ steps.local-digest.outputs.local_digest }}" >> $GITHUB_STEP_SUMMARY
+            #echo "- **Local content-hash:** ${{ steps.content-hash.outputs.content_hash }}" >> $GITHUB_STEP_SUMMARY
             echo "- **Pushed to ECR:** ${{ steps.push-decision.outputs.should_push }}" >> $GITHUB_STEP_SUMMARY
           fi
           
-          # echo "- **GitOps Changed:** ${{ steps.check-gitops-changes.outputs.changed }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **GitOps Changed:** ${{ steps.check-gitops-changes.outputs.changed }}" >> $GITHUB_STEP_SUMMARY
           
-          # if [ "${{ steps.check-gitops-changes.outputs.changed }}" == "true" ]; then
-          #   echo "- **PR Created:** #${{ steps.create-pr.outputs.pr_number }}" >> $GITHUB_STEP_SUMMARY
-          #   echo "- **Auto-merge:** ${{ github.event.inputs.auto_merge }}" >> $GITHUB_STEP_SUMMARY
-          # else
-          #   echo "- **Result:** No changes needed - everything up to date ✅" >> $GITHUB_STEP_SUMMARY
-          # fi
+          if [ "${{ steps.check-gitops-changes.outputs.changed }}" == "true" ]; then
+            echo "- **PR Created:** #${{ steps.create-pr.outputs.pr_number }}" >> $GITHUB_STEP_SUMMARY
+            echo "- **Auto-merge:** ${{ github.event.inputs.auto_merge }}" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "- **Result:** No changes needed - everything up to date ✅" >> $GITHUB_STEP_SUMMARY
+          fi
