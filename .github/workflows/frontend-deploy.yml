@@ -101,25 +101,6 @@ jobs:
         id: login-ecr
         uses: aws-actions/amazon-ecr-login@v2
 
-      - name: Get latest ECR image digest (for comparison)
-        if: ${{ steps.build-strategy.outputs.should_compare_digest == 'true' }}
-        id: ecr-latest
-        run: |
-          # Get the latest image digest from ECR
-          LATEST_DIGEST=$(aws ecr describe-images \
-            --repository-name $(basename ${{ env.ECR_REPOSITORY_FRONTEND }}) \
-            --region ${{ env.AWS_REGION }} \
-            --query 'sort_by(imageDetails,&imagePushedAt)[-1].imageDigest' \
-            --output text 2>/dev/null || echo "none")
-          
-          if [ "$LATEST_DIGEST" == "none" ] && [ "${{ github.event.inputs.action }}" == "update-digest-only" ]; then
-            echo "❌ ERROR: update-digest-only requires existing images in ECR"
-            exit 1
-          fi
-          
-          echo "latest_digest=$LATEST_DIGEST" >> $GITHUB_OUTPUT
-          echo "📋 Latest ECR digest: $LATEST_DIGEST"  
-
       - name: Extract metadata
         if: ${{ steps.build-strategy.outputs.should_build == 'true' }}
         id: meta
@@ -170,7 +151,7 @@ jobs:
             echo "We will be pushing it"
           fi
 
-      # Step 3: Build with content hash label
+      # Step 3: Build with content hash
       - name: Build Docker image with content hash
         run: |
           docker build -t ${{ steps.meta.outputs.image_uri }} .
@@ -196,119 +177,119 @@ jobs:
             echo "✅ Content unchanged - already exists in ECR, skipping push"
           fi
 
-      # - name: Push Docker image to ECR
-      #   if: ${{ steps.push-decision.outputs.should_push == 'true' }}
-      #   run: |
-      #     echo "🚀 Pushing image to ECR..."
-      #     docker push ${{ steps.meta.outputs.image_uri }}
-      #     echo "✅ Image pushed successfully"
+      - name: Push Docker image to ECR
+        if: ${{ steps.push-decision.outputs.should_push == 'true' }}
+        run: |
+          echo "🚀 Pushing image to ECR..."
+          docker push ${{ steps.meta.outputs.image_uri }}
+          echo "✅ Image pushed successfully"
 
-      # - name: Capture final image digest
-      #   id: final-digest
-      #   run: |
-      #     if [ "${{ steps.push-decision.outputs.should_push }}" == "true" ]; then
-      #       # Get digest from newly pushed image
-      #       NEW_DIGEST=$(aws ecr describe-images \
-      #         --repository-name $(basename ${{ env.ECR_REPOSITORY_FRONTEND }}) \
-      #         --region ${{ env.AWS_REGION }} \
-      #         --image-ids imageTag=${{ steps.meta.outputs.tag }} \
-      #         --query 'imageDetails[0].imageDigest' \
-      #         --output text)
-      #       echo "digest_only=$NEW_DIGEST" >> $GITHUB_OUTPUT
-      #       echo "✅ New image digest: $NEW_DIGEST"
-      #     else
-      #       # Use the existing latest digest (covers both digest-only and no-push scenarios)
-      #       echo "digest_only=${{ steps.ecr-latest.outputs.latest_digest }}" >> $GITHUB_OUTPUT
-      #       echo "♻️ Using existing digest: ${{ steps.ecr-latest.outputs.latest_digest }}"
-      #     fi
+      - name: Capture final image digest
+        id: final-digest
+        run: |
+          if [ "${{ steps.push-decision.outputs.should_push }}" == "true" ]; then
+            # Get digest from newly pushed image
+            NEW_DIGEST=$(aws ecr describe-images \
+              --repository-name $(basename ${{ env.ECR_REPOSITORY_FRONTEND }}) \
+              --region ${{ env.AWS_REGION }} \
+              --image-ids imageTag=${{ steps.meta.outputs.tag }} \
+              --query 'imageDetails[0].imageDigest' \
+              --output text)
+            echo "digest_only=$NEW_DIGEST" >> $GITHUB_OUTPUT
+            echo "✅ New image digest: $NEW_DIGEST"
+          else
+            # Use the existing latest digest (covers both digest-only and no-push scenarios)
+            echo "digest_only=${{ steps.ecr-latest.outputs.latest_digest }}" >> $GITHUB_OUTPUT
+            echo "♻️ Using existing digest: ${{ steps.ecr-latest.outputs.latest_digest }}"
+          fi
 
-      # - name: Check if digest changed in GitOps
-      #   id: check-gitops-changes
-      #   env:
-      #     GH_TOKEN: "${{ env.GH_TOKEN }}"
-      #     GITOPS_REPO: ${{ env.GITOPS_REPO }}
-      #     ENVIRONMENT: ${{ github.event.inputs.env }}
-      #     # TARGET_DIGEST is the digest from this workflow
-      #     # it will be the latest digest from the ECR, if a push was made or not
-      #     # this needs to be compared to the digest in GitOps
-      #     TARGET_DIGEST: ${{ steps.final-digest.outputs.digest_only }}
-      #   run: |
-      #     rm -rf gitops-repo
-      #     git clone https://x-access-token:${GH_TOKEN}@github.com/${GITOPS_REPO}.git gitops-repo
-      #     cd gitops-repo
+      - name: Check if digest changed in GitOps
+        id: check-gitops-changes
+        env:
+          GH_TOKEN: "${{ env.GH_TOKEN }}"
+          GITOPS_REPO: ${{ env.GITOPS_REPO }}
+          ENVIRONMENT: ${{ github.event.inputs.env }}
+          # TARGET_DIGEST is the digest from this workflow
+          # it will be the latest digest from the ECR, if a push was made or not
+          # this needs to be compared to the digest in GitOps
+          TARGET_DIGEST: ${{ steps.final-digest.outputs.digest_only }}
+        run: |
+          rm -rf gitops-repo
+          git clone https://x-access-token:${GH_TOKEN}@github.com/${GITOPS_REPO}.git gitops-repo
+          cd gitops-repo
           
-      #     GITOPS_DIGEST=$(grep 'digest:' environments/${ENVIRONMENT}/manifests/frontend/digest-values.yaml | sed 's/.*digest: "\(.*\)"/\1/')
+          GITOPS_DIGEST=$(grep 'digest:' environments/${ENVIRONMENT}/manifests/frontend/digest-values.yaml | sed 's/.*digest: "\(.*\)"/\1/')
           
-      #     if [ "$GITOPS_DIGEST" == "$TARGET_DIGEST" ]; then
-      #       echo "changed=false" >> $GITHUB_OUTPUT
-      #       echo "✅ GitOps digest unchanged: gitops: $GITOPS_DIGEST vs $TARGET_DIGEST"
-      #     else
-      #       echo "changed=true" >> $GITHUB_OUTPUT
-      #       echo "🔄 GitOps digest will change: digest to be replace: $GITOPS_DIGEST → digest to be replaced by: $TARGET_DIGEST"
-      #     fi
+          if [ "$GITOPS_DIGEST" == "$TARGET_DIGEST" ]; then
+            echo "changed=false" >> $GITHUB_OUTPUT
+            echo "✅ GitOps digest unchanged: gitops: $GITOPS_DIGEST vs $TARGET_DIGEST"
+          else
+            echo "changed=true" >> $GITHUB_OUTPUT
+            echo "🔄 GitOps digest will change: digest to be replace: $GITOPS_DIGEST → digest to be replaced by: $TARGET_DIGEST"
+          fi
 
-      # - name: Update GitOps repository
-      #   if: ${{ steps.check-gitops-changes.outputs.changed == 'true' }}
-      #   id: create-pr
-      #   env:
-      #     GH_TOKEN: "${{ env.GH_TOKEN }}"
-      #     GITOPS_REPO: ${{ env.GITOPS_REPO }}
-      #     ENVIRONMENT: ${{ github.event.inputs.env }}
-      #     TARGET_DIGEST: ${{ steps.final-digest.outputs.digest_only }}
-      #   run: |
-      #     cd gitops-repo
-      #     git config user.name "GitHub Actions"
-      #     git config user.email "actions@github.com"
+      - name: Update GitOps repository
+        if: ${{ steps.check-gitops-changes.outputs.changed == 'true' }}
+        id: create-pr
+        env:
+          GH_TOKEN: "${{ env.GH_TOKEN }}"
+          GITOPS_REPO: ${{ env.GITOPS_REPO }}
+          ENVIRONMENT: ${{ github.event.inputs.env }}
+          TARGET_DIGEST: ${{ steps.final-digest.outputs.digest_only }}
+        run: |
+          cd gitops-repo
+          git config user.name "GitHub Actions"
+          git config user.email "actions@github.com"
           
-      #     BRANCH_NAME="frontend-update-$(date +%Y%m%d-%H%M%S)"
-      #     echo "branch_name=$BRANCH_NAME" >> $GITHUB_OUTPUT
+          BRANCH_NAME="frontend-update-$(date +%Y%m%d-%H%M%S)"
+          echo "branch_name=$BRANCH_NAME" >> $GITHUB_OUTPUT
           
-      #     git checkout -b "$BRANCH_NAME"
+          git checkout -b "$BRANCH_NAME"
           
-      #     sed -i "s|digest: \"sha256:.*\"|digest: \"${TARGET_DIGEST}\"|g" environments/${ENVIRONMENT}/manifests/frontend/digest-values.yaml
-      #     git add environments/${ENVIRONMENT}/manifests/frontend/digest-values.yaml
-      #     git commit -m "Update frontend digest for ${ENVIRONMENT}: ${TARGET_DIGEST}"
-      #     git push origin "$BRANCH_NAME"
+          sed -i "s|digest: \"sha256:.*\"|digest: \"${TARGET_DIGEST}\"|g" environments/${ENVIRONMENT}/manifests/frontend/digest-values.yaml
+          git add environments/${ENVIRONMENT}/manifests/frontend/digest-values.yaml
+          git commit -m "Update frontend digest for ${ENVIRONMENT}: ${TARGET_DIGEST}"
+          git push origin "$BRANCH_NAME"
           
-      #     # Create PR and capture response
-      #     PR_RESPONSE=$(curl -s -X POST \
-      #       -H "Authorization: Bearer ${GH_TOKEN}" \
-      #       -H "Accept: application/vnd.github+json" \
-      #       "https://api.github.com/repos/${GITOPS_REPO}/pulls" \
-      #       -d "{\"title\":\"Frontend: Update ${ENVIRONMENT} digest\",\"head\":\"${BRANCH_NAME}\",\"base\":\"main\",\"body\":\"Automated digest update for ${ENVIRONMENT} environment\"}")
+          # Create PR and capture response
+          PR_RESPONSE=$(curl -s -X POST \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${GITOPS_REPO}/pulls" \
+            -d "{\"title\":\"Frontend: Update ${ENVIRONMENT} digest\",\"head\":\"${BRANCH_NAME}\",\"base\":\"main\",\"body\":\"Automated digest update for ${ENVIRONMENT} environment\"}")
           
-      #     # Extract PR number
-      #     PR_NUMBER=$(echo "$PR_RESPONSE" | jq -r '.number')
-      #     echo "pr_number=$PR_NUMBER" >> $GITHUB_OUTPUT
+          # Extract PR number
+          PR_NUMBER=$(echo "$PR_RESPONSE" | jq -r '.number')
+          echo "pr_number=$PR_NUMBER" >> $GITHUB_OUTPUT
           
-      #     if [ "$PR_NUMBER" != "null" ] && [ -n "$PR_NUMBER" ]; then
-      #       echo "✅ Created PR #${PR_NUMBER}"
-      #     else
-      #       echo "❌ Failed to create PR. Response: $PR_RESPONSE"
-      #       exit 1
-      #     fi
+          if [ "$PR_NUMBER" != "null" ] && [ -n "$PR_NUMBER" ]; then
+            echo "✅ Created PR #${PR_NUMBER}"
+          else
+            echo "❌ Failed to create PR. Response: $PR_RESPONSE"
+            exit 1
+          fi
       
-      # - name: Auto-merge GitOps PR
-      #   if: ${{ steps.check-gitops-changes.outputs.changed == 'true' && github.event.inputs.auto_merge == 'true' }}
-      #   env:
-      #     GH_TOKEN: "${{ env.GH_TOKEN }}"
-      #     GITOPS_REPO: ${{ env.GITOPS_REPO }}
-      #   run: |
-      #     PR_NUMBER="${{ steps.create-pr.outputs.pr_number }}"
+      - name: Auto-merge GitOps PR
+        if: ${{ steps.check-gitops-changes.outputs.changed == 'true' && github.event.inputs.auto_merge == 'true' }}
+        env:
+          GH_TOKEN: "${{ env.GH_TOKEN }}"
+          GITOPS_REPO: ${{ env.GITOPS_REPO }}
+        run: |
+          PR_NUMBER="${{ steps.create-pr.outputs.pr_number }}"
           
-      #     if [ -n "$PR_NUMBER" ] && [ "$PR_NUMBER" != "null" ]; then
-      #       echo "🔀 Triggering auto-merge for PR #${PR_NUMBER}..."
+          if [ -n "$PR_NUMBER" ] && [ "$PR_NUMBER" != "null" ]; then
+            echo "🔀 Triggering auto-merge for PR #${PR_NUMBER}..."
             
-      #       curl -X POST \
-      #         -H "Authorization: Bearer ${GH_TOKEN}" \
-      #         -H "Accept: application/vnd.github+json" \
-      #         "https://api.github.com/repos/${GITOPS_REPO}/dispatches" \
-      #         -d "{\"event_type\":\"auto-merge-pr\",\"client_payload\":{\"pr_number\":${PR_NUMBER}}}"
+            curl -X POST \
+              -H "Authorization: Bearer ${GH_TOKEN}" \
+              -H "Accept: application/vnd.github+json" \
+              "https://api.github.com/repos/${GITOPS_REPO}/dispatches" \
+              -d "{\"event_type\":\"auto-merge-pr\",\"client_payload\":{\"pr_number\":${PR_NUMBER}}}"
             
-      #       echo "✅ Auto-merge workflow triggered for PR #${PR_NUMBER}"
-      #     else
-      #       echo "❌ No PR found to auto-merge"
-      #     fi
+            echo "✅ Auto-merge workflow triggered for PR #${PR_NUMBER}"
+          else
+            echo "❌ No PR found to auto-merge"
+          fi
       
       - name: Build Summary
         run: |
