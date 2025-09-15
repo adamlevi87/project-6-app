@@ -136,11 +136,10 @@ jobs:
       
       - name: Get content hash
         run: |
-          cd app/frontend
           CONTENT_HASH=$(find . -type f -exec sha256sum {} \; | sort | sha256sum | cut -d' ' -f1)
           echo "content_hash=$CONTENT_HASH" >> $GITHUB_OUTPUT
           echo "📝 Content hash: $CONTENT_HASH"
-          
+
       - name: Build Docker image (locally)
         if: ${{ steps.build-strategy.outputs.should_build == 'true' }}
         id: build
