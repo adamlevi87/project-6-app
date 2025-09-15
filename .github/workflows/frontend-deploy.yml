@@ -101,23 +101,29 @@ jobs:
             echo "🧠 Smart build - will do nothing"
           fi
 
-      - name: Get latest ECR image digest
+      - name: Get latest ECR image digest (for comparison)
         if: ${{ steps.build-strategy.outputs.should_compare_digest == 'true' }}
         id: ecr-latest
         run: |
-          LATEST_DIGEST=$(aws ecr describe-images \
+          # Get both manifest digest AND config digest from ECR
+          ECR_DATA=$(aws ecr describe-images \
             --repository-name $(basename ${{ env.ECR_REPOSITORY_FRONTEND }}) \
             --region ${{ env.AWS_REGION }} \
-            --query 'sort_by(imageDetails,&imagePushedAt)[-1].imageDigest' \
-            --output text 2>/dev/null || echo "none")
+            --query 'sort_by(imageDetails,&imagePushedAt)[-1].{manifestDigest:imageDigest,configDigest:imageId.imageDigest}' \
+            --output json 2>/dev/null || echo "null")
           
-          if [ "$LATEST_DIGEST" == "none" ] && [ "${{ github.event.inputs.action }}" == "update-digest-only" ]; then
+          if [ "$ECR_DATA" == "null" ] && [ "${{ github.event.inputs.action }}" == "update-digest-only" ]; then
             echo "❌ ERROR: update-digest-only requires existing images in ECR"
             exit 1
           fi
           
-          echo "latest_digest=$LATEST_DIGEST" >> $GITHUB_OUTPUT
-          echo "📋 Latest ECR digest: $LATEST_DIGEST"
+          LATEST_MANIFEST=$(echo "$ECR_DATA" | jq -r '.manifestDigest // "none"')
+          LATEST_CONFIG=$(echo "$ECR_DATA" | jq -r '.configDigest // "none"')
+          
+          echo "latest_manifest_digest=$LATEST_MANIFEST" >> $GITHUB_OUTPUT
+          echo "latest_config_digest=$LATEST_CONFIG" >> $GITHUB_OUTPUT
+          echo "📋 Latest ECR manifest digest: $LATEST_MANIFEST"
+          echo "📋 Latest ECR config digest: $LATEST_CONFIG"
 
       - name: Set up Docker Buildx
         if: ${{ steps.build-strategy.outputs.should_build == 'true' }}
@@ -152,13 +158,14 @@ jobs:
           sbom: false
           outputs: type=docker,dest=/tmp/image.tar
 
-      - name: Get local image digest
+      - name: Get local image digest  
         if: ${{ steps.build-strategy.outputs.should_build == 'true' }}
         id: local-digest
         run: |
-          # Load the image and get its digest
           docker load -i /tmp/image.tar
-          LOCAL_DIGEST=$(docker image inspect ${{ steps.meta.outputs.image_uri }} --format='{{.RepoDigests[0]}}' | cut -d'@' -f2 2>/dev/null || docker image inspect ${{ steps.meta.outputs.image_uri }} --format='{{.Id}}' | sed 's/sha256://')
+          
+          # Get the manifest digest by calculating it from the image
+          LOCAL_DIGEST=$(docker image inspect ${{ steps.meta.outputs.image_uri }} --format='{{.Id}}')
           echo "local_digest=$LOCAL_DIGEST" >> $GITHUB_OUTPUT
           echo "🔍 Local image digest: $LOCAL_DIGEST"
 
@@ -170,17 +177,17 @@ jobs:
           if [ "${{ steps.build-strategy.outputs.strategy }}" == "force" ]; then
             echo "should_push=true" >> $GITHUB_OUTPUT
             echo "🔨 Force push requested"
-          elif [ "${{ steps.ecr-latest.outputs.latest_digest }}" == "none" ]; then
+          elif [ "${{ steps.ecr-latest.outputs.latest_manifest_digest }}" == "none" ]; then
             echo "should_push=true" >> $GITHUB_OUTPUT
             echo "🆕 No existing image in ECR - pushing first image"
-          elif [ "${{ steps.ecr-latest.outputs.latest_digest }}" != "${{ steps.local-digest.outputs.local_digest }}" ]; then
+          elif [ "${{ steps.ecr-latest.outputs.latest_config_digest }}" != "${{ steps.local-digest.outputs.local_digest }}" ]; then
             echo "should_push=true" >> $GITHUB_OUTPUT
-            echo "📝 Image changed - digests differ:"
-            echo "  ECR:   ${{ steps.ecr-latest.outputs.latest_digest }}"
-            echo "  Local: ${{ steps.local-digest.outputs.local_digest }}"
+            echo "📝 Image changed - config digests differ:"
+            echo "  ECR Config:   ${{ steps.ecr-latest.outputs.latest_config_digest }}"
+            echo "  Local Config: ${{ steps.local-digest.outputs.local_digest }}"
           else
             echo "should_push=false" >> $GITHUB_OUTPUT
-            echo "✅ Image unchanged - digests match, skipping push"
+            echo "✅ Image unchanged - config digests match, skipping push"
           fi
 
       - name: Push Docker image to ECR
@@ -205,8 +212,8 @@ jobs:
             echo "✅ New image digest: $NEW_DIGEST"
           else
             # Use the existing latest digest (covers both digest-only and no-push scenarios)
-            echo "digest_only=${{ steps.ecr-latest.outputs.latest_digest }}" >> $GITHUB_OUTPUT
-            echo "♻️ Using existing digest: ${{ steps.ecr-latest.outputs.latest_digest }}"
+            echo "digest_only=${{ steps.ecr-latest.outputs.latest_manifest_digest }}" >> $GITHUB_OUTPUT
+            echo "♻️ Using existing digest: ${{ steps.ecr-latest.outputs.latest_manifest_digest }}"
           fi
 
       - name: Check if digest changed in GitOps
