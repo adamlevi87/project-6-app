@@ -316,6 +316,8 @@ jobs:
             echo "- **ECR Digest after the changes:** ${{ steps.final-digest.outputs.digest_only }}" >> $GITHUB_STEP_SUMMARY
           fi
 
+          echo "- **Content Tag:** ${{ steps.ecr-check.outputs.content_tag }}" >> $GITHUB_STEP_SUMMARY
+          
           if [ "${{ steps.build-strategy.outputs.should_build }}" == "true" ]; then
             echo "- **Built Image:** ${{ steps.meta.outputs.tag }}" >> $GITHUB_STEP_SUMMARY
             #echo "- **Local content-hash:** ${{ steps.content-hash.outputs.content_hash }}" >> $GITHUB_STEP_SUMMARY
