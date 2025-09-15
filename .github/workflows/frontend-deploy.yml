@@ -134,20 +134,13 @@ jobs:
           echo "image_uri=$IMAGE_URI" >> $GITHUB_OUTPUT
           echo "sha_short=$SHA_SHORT" >> $GITHUB_OUTPUT
       
-      - name: Debug build context
+      - name: Get content hash
         run: |
-          # will be moving this later on to docker build maybe
-          find . -type f -exec touch -t 202001010000 {} \;
-
-          echo "=== Files and timestamps ==="
-          find . -type f -exec stat {} \; | head -20
+          cd app/frontend
+          CONTENT_HASH=$(find . -type f -exec sha256sum {} \; | sort | sha256sum | cut -d' ' -f1)
+          echo "content_hash=$CONTENT_HASH" >> $GITHUB_OUTPUT
+          echo "📝 Content hash: $CONTENT_HASH"
           
-          echo "=== File hashes ==="
-          find . -type f -exec sha256sum {} \; | sort
-          
-          echo "=== Docker version ==="
-          docker version
-
       - name: Build Docker image (locally)
         if: ${{ steps.build-strategy.outputs.should_build == 'true' }}
         id: build
