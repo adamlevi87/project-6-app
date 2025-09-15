@@ -149,6 +149,7 @@ jobs:
         if: ${{ steps.build-strategy.outputs.should_build == 'true' }}
         id: build
         run: |
+          find . -type f -exec touch -t 202001010000 {} \;
           docker build -t ${{ steps.meta.outputs.image_uri }} .
           docker save ${{ steps.meta.outputs.image_uri }} -o /tmp/image.tar
           echo "✅ Image built and saved"
