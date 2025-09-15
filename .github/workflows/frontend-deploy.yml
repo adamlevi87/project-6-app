@@ -158,10 +158,6 @@ jobs:
           fi
 
       # Step 3: Build with content hash
-      - name: Build Docker image with content hash
-        run: |
-          docker build -t ${{ steps.meta.outputs.image_uri }} .
-
       - name: Build Docker image
         if: ${{ steps.build-strategy.outputs.should_build == 'true' }}
         run: |
@@ -188,7 +184,12 @@ jobs:
         run: |
           echo "🚀 Pushing image to ECR..."
           docker push ${{ steps.meta.outputs.image_uri }}
+          CONTENT_TAG="${{ env.ECR_REPOSITORY_FRONTEND }}:content-${{ steps.content-hash.outputs.content_hash }}"
+          docker tag ${{ steps.meta.outputs.image_uri }} $CONTENT_TAG
+          docker push $CONTENT_TAG
+          
           echo "✅ Image pushed successfully"
+          echo "✅ Content tag created: content-${{ steps.content-hash.outputs.content_hash }}"
 
       - name: Capture final image digest
         id: final-digest
