@@ -92,7 +92,7 @@ jobs:
             echo "should_compare_digest=true" >> $GITHUB_OUTPUT
             echo "strategy=digest-only" >> $GITHUB_OUTPUT
             echo "📦 Update digest only - skipping build entirely"
-          elseif [ "${{ github.event.inputs.action }}" == "build-and-push" ]; then
+          elif [ "${{ github.event.inputs.action }}" == "build-and-push" ]; then
             echo "should_build=true" >> $GITHUB_OUTPUT
             echo "should_compare_digest=true" >> $GITHUB_OUTPUT
             echo "strategy=smart" >> $GITHUB_OUTPUT
